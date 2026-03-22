@@ -1,0 +1,239 @@
+/* ============================================================
+   Crystalline Rec - Custom Styles
+   ============================================================ */
+
+/* Tailwind-like utility classes for the Electron app (no CDN) */
+/* These are supplementary - Tailwind CDN in index.html handles most styling */
+
+:root {
+  --primary: #004f96;
+  --primary-container: #0067c0;
+  --on-primary: #ffffff;
+  --surface: #f9f9f9;
+  --on-surface: #1a1c1c;
+  --on-surface-variant: #414752;
+  --outline-variant: #c1c6d4;
+  --surface-container-low: #f3f3f3;
+  --surface-container-lowest: #ffffff;
+  --surface-container-high: #e8e8e8;
+  --surface-container-highest: #e2e2e2;
+  --error: #ba1a1a;
+  --secondary: #485f83;
+  --secondary-container: #bed6ff;
+}
+
+/* Base */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Material Symbols */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  display: inline-block;
+  line-height: 1;
+  text-transform: none;
+  letter-spacing: normal;
+  word-wrap: normal;
+  white-space: nowrap;
+  direction: ltr;
+  vertical-align: middle;
+}
+
+/* App draggable area for custom title bar */
+.app-drag {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--surface-container-highest);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--outline-variant);
+}
+
+/* Toggle switch */
+.toggle-dot {
+  transition: transform 0.2s ease-in-out;
+}
+
+/* Waveform canvas */
+#waveform-canvas {
+  display: block;
+  width: 100%;
+  height: 128px;
+}
+
+/* Transcript segments */
+.transcript-segment {
+  transition: background-color 0.3s ease, padding 0.3s ease, margin 0.3s ease;
+}
+
+.transcript-segment [contenteditable]:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(0, 79, 150, 0.2);
+  border-radius: 8px;
+}
+
+/* Chat input auto-resize */
+#chat-input {
+  min-height: 48px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* Toast animation */
+#toast {
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Delete dialog backdrop */
+#delete-dialog {
+  animation: fadeIn 0.15s ease-out;
+}
+
+#delete-dialog > div {
+  animation: scaleIn 0.15s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Loading spinner */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Hover effects for meeting rows */
+[data-meeting-id]:hover {
+  cursor: pointer;
+}
+
+/* Range input styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--surface-container-highest);
+  border-radius: 4px;
+  height: 4px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--primary);
+  cursor: pointer;
+}
+
+/* Smooth view transitions */
+.view {
+  animation: viewFadeIn 0.2s ease-out;
+}
+
+@keyframes viewFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Focus states for accessibility */
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: var(--secondary-container);
+  color: var(--on-surface);
+}
+
+/* Transcript active segment highlight */
+.transcript-segment.active-segment {
+  background: rgba(213, 227, 255, 0.3);
+  margin-left: -1.5rem;
+  margin-right: -1.5rem;
+  padding: 1rem 1.5rem;
+  border-radius: 1rem;
+}
+
+/* Print styles */
+@media print {
+  #sidebar,
+  #topbar,
+  #audio-player,
+  #ai-chat-panel,
+  .nav-link,
+  button {
+    display: none !important;
+  }
+
+  main {
+    margin-left: 0 !important;
+  }
+
+  .transcript-segment {
+    page-break-inside: avoid;
+  }
+}

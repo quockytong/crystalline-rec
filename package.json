@@ -1,0 +1,66 @@
+{
+  "name": "crystalline-rec",
+  "version": "1.0.0",
+  "description": "Meeting recorder with AI transcription - Crystalline Rec",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:portable": "electron-builder --win portable",
+    "build:nsis": "electron-builder --win nsis"
+  },
+  "author": "Crystalline Audio",
+  "license": "MIT",
+  "dependencies": {
+    "electron-store": "^8.1.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.crystalline.rec",
+    "productName": "Crystalline Rec",
+    "copyright": "Copyright © 2024 Crystalline Audio",
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Crystalline Rec"
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "renderer.js",
+      "styles.css",
+      "assets/**/*",
+      "node_modules/**/*",
+      "!node_modules/electron/**/*",
+      "!node_modules/electron-builder/**/*",
+      "!**/*.map",
+      "!**/*.md"
+    ],
+    "extraMetadata": {
+      "main": "main.js"
+    }
+  }
+}
