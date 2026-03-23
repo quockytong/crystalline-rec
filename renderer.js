@@ -259,7 +259,7 @@ async function finishRecording() {
       navigateTo('detail', currentMeeting.id);
 
       // Auto-transcribe if Google API key is configured
-      const model = settings.transcriptionModel || 'gemini-2.0-flash';
+      const model = settings.transcriptionModel || 'gemini-2.5-flash';
       if (settings.apiKeys?.google) startTranscription(currentMeeting.id, model);
 
       resolve();
@@ -561,11 +561,18 @@ function setupTranscriptEditing() {
   });
 
   document.querySelectorAll('.timestamp-click').forEach(el => {
-    el.addEventListener('click', () => {
+    el.addEventListener('click', async () => {
       const t = parseFloat(el.dataset.time);
-      if (audioPlayer.src) {
-        audioPlayer.currentTime = t;
-        if (!isPlaying) { audioPlayer.play(); isPlaying = true; updatePlayBtn(); }
+      if (!playerReady) return;
+      audioPlayer.currentTime = t;
+      updatePlayerUI();
+      if (!isPlaying) {
+        try {
+          await audioPlayer.play();
+          isPlaying = true;
+          startProgressLoop();
+          updatePlayBtn();
+        } catch (err) { console.error('Play failed:', err); }
       }
     });
   });
@@ -587,6 +594,18 @@ function flashAutosave() {
 }
 
 // ── TRANSCRIPTION ──────────────────────────────────────────
+
+// Listen for chunk progress from main process
+api.onTranscriptionProgress(({ current, total }) => {
+  const loading = document.getElementById('transcript-loading');
+  if (!loading.classList.contains('hidden')) {
+    const progressEl = loading.querySelector('.transcription-progress-text');
+    if (progressEl) {
+      progressEl.textContent = `Transcribing chunk ${current} of ${total}…`;
+    }
+  }
+});
+
 async function startTranscription(meetingId, model) {
   const content = document.getElementById('transcript-content');
   const loading = document.getElementById('transcript-loading');
@@ -595,6 +614,16 @@ async function startTranscription(meetingId, model) {
   content.innerHTML = '';
   empty.classList.add('hidden');
   loading.classList.remove('hidden');
+
+  // Add progress text element if not present
+  if (!loading.querySelector('.transcription-progress-text')) {
+    const pEl = document.createElement('p');
+    pEl.className = 'transcription-progress-text text-[12px] text-zinc-400 mt-2';
+    pEl.textContent = 'Uploading audio…';
+    loading.appendChild(pEl);
+  } else {
+    loading.querySelector('.transcription-progress-text').textContent = 'Uploading audio…';
+  }
 
   try {
     const transcript = await api.transcribeAudio(meetingId, model);
@@ -616,50 +645,106 @@ async function startTranscription(meetingId, model) {
 }
 
 // ── AUDIO PLAYER ───────────────────────────────────────────
+let playerReady = false;   // true once audio duration is known
+let playerAnimFrame = null; // rAF id for smooth progress updates
+
 function setupPlayerControls() {
   document.getElementById('player-play-pause').addEventListener('click', togglePlay);
-  document.getElementById('player-back-10').addEventListener('click', () => { audioPlayer.currentTime = Math.max(0, audioPlayer.currentTime - 10); });
-  document.getElementById('player-fwd-10').addEventListener('click', () => { audioPlayer.currentTime = Math.min(audioPlayer.duration || 0, audioPlayer.currentTime + 10); });
-  document.getElementById('player-volume').addEventListener('input', e => { audioPlayer.volume = parseFloat(e.target.value); });
+
+  document.getElementById('player-back-10').addEventListener('click', () => {
+    if (!playerReady) return;
+    audioPlayer.currentTime = Math.max(0, audioPlayer.currentTime - 10);
+    updatePlayerUI();
+  });
+
+  document.getElementById('player-fwd-10').addEventListener('click', () => {
+    if (!playerReady) return;
+    audioPlayer.currentTime = Math.min(audioPlayer.duration, audioPlayer.currentTime + 10);
+    updatePlayerUI();
+  });
+
+  document.getElementById('player-volume').addEventListener('input', e => {
+    audioPlayer.volume = parseFloat(e.target.value);
+  });
+
   document.getElementById('player-speed').addEventListener('click', () => {
     speedIndex = (speedIndex + 1) % SPEEDS.length;
     audioPlayer.playbackRate = SPEEDS[speedIndex];
     document.getElementById('player-speed').textContent = SPEEDS[speedIndex] + '×';
   });
 
-  // Seekbar
+  // Seekbar click-to-seek
   const bar = document.getElementById('player-progress-bar');
   bar.addEventListener('click', e => {
+    if (!playerReady || !audioPlayer.duration) return;
     const r = bar.getBoundingClientRect();
-    const ratio = (e.clientX - r.left) / r.width;
-    if (audioPlayer.duration) audioPlayer.currentTime = ratio * audioPlayer.duration;
+    const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    audioPlayer.currentTime = ratio * audioPlayer.duration;
+    updatePlayerUI();
   });
 
-  // Player events
-  audioPlayer.addEventListener('timeupdate', () => {
-    if (!audioPlayer.duration) return;
-    const pct = (audioPlayer.currentTime / audioPlayer.duration) * 100;
-    document.getElementById('player-progress').style.width = `${pct}%`;
-    const thumb = document.getElementById('player-thumb');
-    if (thumb) { thumb.style.left = `${pct}%`; }
-    document.getElementById('player-current-time').textContent = formatTimestamp(audioPlayer.currentTime);
-    highlightSegment(audioPlayer.currentTime);
+  // Use BOTH timeupdate AND a rAF loop for smooth progress on Windows
+  audioPlayer.addEventListener('timeupdate', updatePlayerUI);
+
+  // loadedmetadata sometimes doesn't fire on Windows for webm blobs —
+  // also listen to durationchange and canplay as fallbacks
+  audioPlayer.addEventListener('loadedmetadata', onDurationKnown);
+  audioPlayer.addEventListener('durationchange', onDurationKnown);
+  audioPlayer.addEventListener('canplay', onDurationKnown);
+
+  audioPlayer.addEventListener('ended', () => {
+    isPlaying = false;
+    stopProgressLoop();
+    updatePlayBtn();
   });
 
-  audioPlayer.addEventListener('loadedmetadata', () => {
-    document.getElementById('player-total-time').textContent = formatDuration(audioPlayer.duration);
+  audioPlayer.addEventListener('error', (e) => {
+    console.error('Audio player error:', audioPlayer.error);
+    playerReady = false;
+    isPlaying = false;
+    updatePlayBtn();
   });
+}
 
-  audioPlayer.addEventListener('ended', () => { isPlaying = false; updatePlayBtn(); });
+function onDurationKnown() {
+  if (!audioPlayer.duration || !isFinite(audioPlayer.duration)) return;
+  playerReady = true;
+  document.getElementById('player-total-time').textContent = formatDuration(audioPlayer.duration);
+}
+
+function updatePlayerUI() {
+  if (!audioPlayer.duration || !isFinite(audioPlayer.duration)) return;
+  const pct = (audioPlayer.currentTime / audioPlayer.duration) * 100;
+  document.getElementById('player-progress').style.width = `${pct}%`;
+  document.getElementById('player-thumb').style.left = `${pct}%`;
+  document.getElementById('player-current-time').textContent = formatTimestamp(audioPlayer.currentTime);
+  highlightSegment(audioPlayer.currentTime);
+}
+
+// requestAnimationFrame loop for buttery-smooth progress while playing
+function startProgressLoop() {
+  function tick() {
+    updatePlayerUI();
+    playerAnimFrame = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+function stopProgressLoop() {
+  if (playerAnimFrame) { cancelAnimationFrame(playerAnimFrame); playerAnimFrame = null; }
 }
 
 let currentBlobUrl = null;
 
 async function loadAudioPlayer(meetingId) {
-  // Revoke previous blob URL to free memory
+  // Reset state
+  stopProgressLoop();
+  playerReady = false;
+  isPlaying = false;
+  updatePlayBtn();
+
   if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
 
-  // Read file as buffer via IPC → Blob URL (avoids all file:// URL issues on Windows)
   const buffer = await api.getAudioBuffer(meetingId);
   if (buffer) {
     const blob = new Blob([buffer], { type: 'audio/webm' });
@@ -667,16 +752,29 @@ async function loadAudioPlayer(meetingId) {
     audioPlayer.src = currentBlobUrl;
     audioPlayer.load();
     currentPlayingMeetingId = meetingId;
-    isPlaying = false;
-    updatePlayBtn();
     document.getElementById('player-progress').style.width = '0%';
+    document.getElementById('player-thumb').style.left = '0%';
     document.getElementById('player-current-time').textContent = '00:00:00';
   }
 }
 
-function togglePlay() {
-  isPlaying ? audioPlayer.pause() : audioPlayer.play();
-  isPlaying = !isPlaying;
+async function togglePlay() {
+  if (!playerReady) return;
+  if (isPlaying) {
+    audioPlayer.pause();
+    isPlaying = false;
+    stopProgressLoop();
+  } else {
+    try {
+      await audioPlayer.play();
+      isPlaying = true;
+      startProgressLoop();
+    } catch (err) {
+      console.error('Play failed:', err);
+      showToast('Playback failed: ' + err.message, 'error');
+      return;
+    }
+  }
   updatePlayBtn();
 }
 
@@ -878,8 +976,8 @@ function setupSettingsControls() {
 async function populateSettings() {
   settings = await api.getSettings();
   document.getElementById('settings-save-path').textContent = settings.saveLocation;
-  document.getElementById('settings-transcription-model').value = settings.transcriptionModel || 'gemini-2.0-flash';
-  document.getElementById('settings-chat-model').value = settings.chatModel || 'gemini-2.0-flash';
+  document.getElementById('settings-transcription-model').value = settings.transcriptionModel || 'gemini-2.5-flash';
+  document.getElementById('settings-chat-model').value = settings.chatModel || 'gemini-2.5-flash';
 
   // Google API key only
   const input = document.getElementById('api-key-google');

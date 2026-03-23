@@ -23,5 +23,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // AI Services
   transcribeAudio: (meetingId, model) => ipcRenderer.invoke('transcribe-audio', { meetingId, model }),
-  aiChat: (messages, transcript, model) => ipcRenderer.invoke('ai-chat', { messages, transcript, model })
+  aiChat: (messages, transcript, model) => ipcRenderer.invoke('ai-chat', { messages, transcript, model }),
+
+  // Progress events
+  onTranscriptionProgress: (callback) => ipcRenderer.on('transcription-progress', (event, data) => callback(data))
 });

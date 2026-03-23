@@ -210,14 +210,81 @@ ipcMain.handle('ai-chat', async (event, { messages, transcript, model }) => {
 
 // ============ GEMINI TRANSCRIPTION ============
 
+const CHUNK_DURATION_SEC = 60; // 1-minute chunks
+
 async function transcribeWithGemini(audioBuffer, apiKey, model) {
-  // Step 1: upload audio to the Gemini File API
+  // Step 1: upload audio once to the Gemini File API
   const fileUri = await uploadGeminiFile(audioBuffer, apiKey);
 
-  // Step 2: ask Gemini to transcribe with speaker labels
+  try {
+    // Step 2: estimate duration from file size (128kbps webm ≈ 16KB/s)
+    const estimatedDuration = Math.max(60, Math.ceil(audioBuffer.length / 16000));
+    const chunkCount = Math.ceil(estimatedDuration / CHUNK_DURATION_SEC);
+
+    // For short audio (≤ 2 min), transcribe in one shot
+    if (chunkCount <= 2) {
+      return await transcribeChunk(fileUri, apiKey, model, null, null);
+    }
+
+    // Step 3: transcribe in 1-minute windows to reduce output tokens per call
+    const allSegments = [];
+    const previousSpeakers = []; // carry speaker names across chunks for consistency
+
+    for (let i = 0; i < chunkCount; i++) {
+      const startSec = i * CHUNK_DURATION_SEC;
+      const endSec = (i + 1) * CHUNK_DURATION_SEC;
+
+      // Notify renderer of progress
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('transcription-progress', {
+          current: i + 1,
+          total: chunkCount
+        });
+      }
+
+      try {
+        const segments = await transcribeChunk(
+          fileUri, apiKey, model, startSec, endSec, previousSpeakers
+        );
+        // Track speaker names for consistency
+        segments.forEach(seg => {
+          if (!previousSpeakers.includes(seg.speaker)) previousSpeakers.push(seg.speaker);
+        });
+        allSegments.push(...segments);
+      } catch (err) {
+        console.error(`Chunk ${i + 1}/${chunkCount} failed:`, err.message);
+        // Continue with remaining chunks — don't abort entire transcription
+      }
+    }
+
+    if (allSegments.length === 0) {
+      throw new Error('All transcription chunks failed. Check your API key and try again.');
+    }
+
+    return allSegments;
+  } finally {
+    // Clean up uploaded file
+    deleteGeminiFile(fileUri, apiKey).catch(() => {});
+  }
+}
+
+async function transcribeChunk(fileUri, apiKey, model, startSec, endSec, knownSpeakers) {
+  let timeInstruction = '';
+  if (startSec !== null && endSec !== null) {
+    const startTs = formatTimestamp(startSec);
+    const endTs = formatTimestamp(endSec);
+    timeInstruction = `\nOnly transcribe audio between ${startTs} and ${endTs}. Ignore audio outside this window. Timestamps must be absolute (from the start of the full recording).`;
+  }
+
+  let speakerInstruction = '';
+  if (knownSpeakers && knownSpeakers.length > 0) {
+    speakerInstruction = `\nKnown speakers so far: ${knownSpeakers.join(', ')}. Reuse these names if the same voices appear. Only add new speaker labels if you hear a new voice.`;
+  }
+
   const prompt = `Transcribe this meeting audio. Output ONLY a JSON array, no markdown, no explanation.
-Label speakers "Speaker 1", "Speaker 2" etc. by voice (consistent throughout).
+Label speakers "Speaker 1", "Speaker 2" etc. by voice (consistent throughout).${speakerInstruction}${timeInstruction}
 Each item: {"speaker":"Speaker 1","timestamp":"00:00:04","startTime":4.0,"endTime":9.5,"text":"words"}
+If the audio segment is silent or has no speech, return an empty array [].
 JSON array:`;
 
   const res = await fetch(
@@ -232,13 +299,10 @@ JSON array:`;
             { text: prompt }
           ]
         }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+        generationConfig: { temperature: 0.1, maxOutputTokens: 4096 }
       })
     }
   );
-
-  // Clean up uploaded file (fire and forget)
-  deleteGeminiFile(fileUri, apiKey).catch(() => {});
 
   if (!res.ok) throw new Error(`Gemini transcription error: ${await res.text()}`);
   const data = await res.json();
@@ -249,9 +313,7 @@ JSON array:`;
   const clean = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
   const jsonStart = clean.indexOf('[');
   const jsonEnd = clean.lastIndexOf(']');
-  if (jsonStart === -1 || jsonEnd === -1) {
-    throw new Error('Gemini did not return a valid transcript array. Try again or check your API key.');
-  }
+  if (jsonStart === -1 || jsonEnd === -1) return []; // empty chunk
 
   const segments = JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
   return segments.map(seg => ({
@@ -261,7 +323,7 @@ JSON array:`;
     startTime: Number(seg.startTime) || 0,
     endTime: Number(seg.endTime) || 0,
     text: (seg.text || '').trim()
-  }));
+  })).filter(seg => seg.text.length > 0);
 }
 
 async function uploadGeminiFile(audioBuffer, apiKey) {
