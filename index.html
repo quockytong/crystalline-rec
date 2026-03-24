@@ -203,10 +203,17 @@
             </div>
             <h2 class="text-xl font-bold text-on-surface mb-2">Ready to capture your meeting</h2>
             <p class="text-on-surface-variant text-sm mb-8 max-w-sm">Records your microphone and system audio simultaneously — even when wearing headphones.</p>
-            <button id="btn-start-from-empty" class="px-8 py-3.5 bg-primary text-white rounded-2xl font-bold shadow-lg shadow-primary/20 hover:shadow-xl hover:shadow-primary/25 hover:-translate-y-0.5 active:translate-y-0 transition-all flex items-center gap-2.5 text-sm">
-              <span class="material-symbols-outlined text-[18px]" style="font-variation-settings:'FILL' 1;">mic</span>
-              Start Recording
-            </button>
+            <div class="flex items-center gap-4">
+              <button id="btn-start-from-empty" class="px-8 py-3.5 bg-primary text-white rounded-2xl font-bold shadow-lg shadow-primary/20 hover:shadow-xl hover:shadow-primary/25 hover:-translate-y-0.5 active:translate-y-0 transition-all flex items-center gap-2.5 text-sm">
+                <span class="material-symbols-outlined text-[18px]" style="font-variation-settings:'FILL' 1;">mic</span>
+                Start Recording
+              </button>
+              <span class="text-zinc-400 text-sm font-medium">or</span>
+              <button id="btn-import-audio" class="px-8 py-3.5 bg-surface-container-lowest text-on-surface border border-outline-variant/30 rounded-2xl font-bold shadow-sm hover:shadow-md hover:-translate-y-0.5 active:translate-y-0 transition-all flex items-center gap-2.5 text-sm">
+                <span class="material-symbols-outlined text-[18px]">upload_file</span>
+                Import Audio File
+              </button>
+            </div>
           </div>
         </div>
 
@@ -215,7 +222,7 @@
           <div class="flex justify-between items-end mb-10">
             <div>
               <h1 class="text-4xl font-black tracking-tight text-on-surface mb-1">Active Session</h1>
-              <p id="record-source-label" class="text-on-surface-variant font-medium">Recording from Default Input · 48 kHz</p>
+              <p id="record-source-label" class="text-on-surface-variant font-medium">Recording from Default Input · 16 kHz Mono (optimized)</p>
             </div>
             <div class="flex items-center gap-2.5 bg-surface-container-lowest px-4 py-2 rounded-full border border-outline-variant/20 shadow-sm">
               <span class="text-[11px] font-bold text-on-surface-variant uppercase tracking-wide">System Audio</span>

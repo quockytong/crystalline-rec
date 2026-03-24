@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveAudio: (meetingId, audioBuffer) => ipcRenderer.invoke('save-audio', { meetingId, audioBuffer }),
   getAudioPath: (meetingId) => ipcRenderer.invoke('get-audio-path', meetingId),
   getAudioBuffer: (meetingId) => ipcRenderer.invoke('get-audio-buffer', meetingId),
+  importAudio: () => ipcRenderer.invoke('import-audio'),
 
   // AI Services
   transcribeAudio: (meetingId, model) => ipcRenderer.invoke('transcribe-audio', { meetingId, model }),

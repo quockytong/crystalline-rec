@@ -163,15 +163,57 @@ ipcMain.handle('get-meeting', (event, meetingId) => {
 
 ipcMain.handle('get-audio-path', (event, meetingId) => {
   const saveLocation = store.get('saveLocation');
-  const audioPath = path.join(saveLocation, meetingId, 'recording.webm');
-  return fs.existsSync(audioPath) ? audioPath : null;
+  return findAudioFile(path.join(saveLocation, meetingId));
 });
 
 ipcMain.handle('get-audio-buffer', (event, meetingId) => {
   const saveLocation = store.get('saveLocation');
-  const audioPath = path.join(saveLocation, meetingId, 'recording.webm');
-  if (!fs.existsSync(audioPath)) return null;
-  return fs.readFileSync(audioPath); // returns Buffer → Uint8Array in renderer
+  const audioPath = findAudioFile(path.join(saveLocation, meetingId));
+  if (!audioPath) return null;
+  return fs.readFileSync(audioPath);
+});
+
+// Import an audio file from disk as a new meeting
+ipcMain.handle('import-audio', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Audio File',
+    filters: [
+      { name: 'Audio Files', extensions: ['mp3', 'wav', 'webm', 'ogg', 'm4a', 'aac', 'flac', 'wma'] }
+    ],
+    properties: ['openFile']
+  });
+
+  if (result.canceled || result.filePaths.length === 0) return null;
+
+  const srcPath = result.filePaths[0];
+  const originalName = path.basename(srcPath, path.extname(srcPath));
+  const ext = path.extname(srcPath);
+
+  const id = uuidv4();
+  const saveLocation = store.get('saveLocation');
+  const meetingDir = path.join(saveLocation, id);
+  fs.mkdirSync(meetingDir, { recursive: true });
+
+  // Copy audio file to meeting folder, keep original extension
+  const destPath = path.join(meetingDir, `recording${ext}`);
+  fs.copyFileSync(srcPath, destPath);
+
+  // Get file stats for approximate duration (will be updated when player loads)
+  const stats = fs.statSync(destPath);
+
+  const meeting = {
+    id,
+    title: originalName || `Imported — ${new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`,
+    createdAt: new Date().toISOString(),
+    duration: 0,
+    status: 'recorded',
+    transcript: [],
+    chatHistory: [],
+    audioFile: `recording${ext}`
+  };
+
+  fs.writeFileSync(path.join(meetingDir, 'meeting.json'), JSON.stringify(meeting, null, 2));
+  return meeting;
 });
 
 ipcMain.handle('delete-meeting', (event, meetingId) => {
@@ -187,14 +229,16 @@ ipcMain.handle('delete-meeting', (event, meetingId) => {
 // Transcription — Gemini only
 ipcMain.handle('transcribe-audio', async (event, { meetingId, model }) => {
   const saveLocation = store.get('saveLocation');
-  const audioPath = path.join(saveLocation, meetingId, 'recording.webm');
+  const audioPath = findAudioFile(path.join(saveLocation, meetingId));
   const apiKey = store.get('apiKeys').google;
 
-  if (!fs.existsSync(audioPath)) throw new Error('Audio file not found');
+  if (!audioPath) throw new Error('Audio file not found');
   if (!apiKey) throw new Error('Google API key not configured — go to Settings');
 
+  const ext = path.extname(audioPath);
+  const mime = mimeForExt(ext);
   const audioBuffer = fs.readFileSync(audioPath);
-  return await transcribeWithGemini(audioBuffer, apiKey, model);
+  return await transcribeWithGemini(audioBuffer, apiKey, model, mime);
 });
 
 // AI Chat — Gemini only
@@ -208,17 +252,40 @@ ipcMain.handle('ai-chat', async (event, { messages, transcript, model }) => {
   return await chatWithGemini(systemPrompt, messages, apiKey, model);
 });
 
+// ============ HELPERS — FILE LOOKUP ============
+
+const AUDIO_EXTENSIONS = ['.webm', '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'];
+
+function findAudioFile(meetingDir) {
+  for (const ext of AUDIO_EXTENSIONS) {
+    const p = path.join(meetingDir, `recording${ext}`);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function mimeForExt(ext) {
+  const map = {
+    '.webm': 'audio/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
+    '.flac': 'audio/flac', '.wma': 'audio/x-ms-wma'
+  };
+  return map[ext] || 'audio/webm';
+}
+
 // ============ GEMINI TRANSCRIPTION ============
 
 const CHUNK_DURATION_SEC = 60; // 1-minute chunks
 
-async function transcribeWithGemini(audioBuffer, apiKey, model) {
+async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/webm') {
   // Step 1: upload audio once to the Gemini File API
-  const fileUri = await uploadGeminiFile(audioBuffer, apiKey);
+  const fileUri = await uploadGeminiFile(audioBuffer, apiKey, mime);
 
   try {
-    // Step 2: estimate duration from file size (128kbps webm ≈ 16KB/s)
-    const estimatedDuration = Math.max(60, Math.ceil(audioBuffer.length / 16000));
+    // Step 2: estimate duration from file size
+    // 32kbps mono webm ≈ 4KB/s; imported files may be larger (128kbps ≈ 16KB/s)
+    const bytesPerSec = audioBuffer.length > 500000 ? 16000 : 4000;
+    const estimatedDuration = Math.max(60, Math.ceil(audioBuffer.length / bytesPerSec));
     const chunkCount = Math.ceil(estimatedDuration / CHUNK_DURATION_SEC);
 
     // For short audio (≤ 2 min), transcribe in one shot
@@ -295,7 +362,7 @@ JSON array:`;
       body: JSON.stringify({
         contents: [{
           parts: [
-            { fileData: { mimeType: 'audio/webm', fileUri } },
+            { fileData: { mimeType: mime, fileUri } },
             { text: prompt }
           ]
         }],
@@ -326,14 +393,14 @@ JSON array:`;
   })).filter(seg => seg.text.length > 0);
 }
 
-async function uploadGeminiFile(audioBuffer, apiKey) {
+async function uploadGeminiFile(audioBuffer, apiKey, mime = 'audio/webm') {
   // Multipart upload to the Gemini File API
   const boundary = `----GeminiBoundary${Date.now()}`;
-  const meta = JSON.stringify({ file: { mimeType: 'audio/webm', displayName: 'recording.webm' } });
+  const meta = JSON.stringify({ file: { mimeType: mime, displayName: 'recording' } });
 
   const body = Buffer.concat([
     Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=utf-8\r\n\r\n${meta}\r\n`),
-    Buffer.from(`--${boundary}\r\nContent-Type: audio/webm\r\n\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`),
     audioBuffer,
     Buffer.from(`\r\n--${boundary}--`)
   ]);

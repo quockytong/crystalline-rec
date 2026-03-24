@@ -61,6 +61,7 @@ function setupNavigation() {
   });
   document.getElementById('btn-new-recording').addEventListener('click', startNewRecording);
   document.getElementById('btn-start-from-empty').addEventListener('click', startNewRecording);
+  document.getElementById('btn-import-audio').addEventListener('click', importAudioFile);
   document.getElementById('btn-back-to-history').addEventListener('click', () => navigateTo('history'));
 }
 
@@ -98,6 +99,20 @@ function updateTopbar(view) {
   if (view === 'record' && isRecording) live.classList.remove('hidden');
 }
 
+// ── IMPORT AUDIO ──────────────────────────────────────────
+async function importAudioFile() {
+  try {
+    const meeting = await api.importAudio();
+    if (!meeting) return; // user cancelled dialog
+    await loadMeetings();
+    showToast('Audio imported! Click "Transcribe Now" when ready.', 'upload_file');
+    navigateTo('detail', meeting.id);
+  } catch (err) {
+    console.error(err);
+    showToast('Import failed: ' + err.message, 'error');
+  }
+}
+
 // ── RECORDING ──────────────────────────────────────────────
 function setupRecordingControls() {
   document.getElementById('btn-pause').addEventListener('click', pauseRecording);
@@ -117,24 +132,32 @@ async function startNewRecording() {
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
-        sampleRate: 48000
+        sampleRate: 16000,
+        channelCount: 1
       }
     };
 
     recordingStream = await navigator.mediaDevices.getUserMedia(micConstraints);
 
-    audioContext = new AudioContext({ sampleRate: 48000 });
+    // Use 16kHz mono to minimize file size and API token usage
+    audioContext = new AudioContext({ sampleRate: 16000 });
     const src = audioContext.createMediaStreamSource(recordingStream);
     analyserNode = audioContext.createAnalyser();
     analyserNode.fftSize = 512;
     src.connect(analyserNode);
 
+    // Downmix everything to mono via AudioContext destination
     let combinedStream = recordingStream;
     if (systemAudioEnabled) combinedStream = await addSystemAudio(recordingStream);
 
-    mediaRecorder = new MediaRecorder(combinedStream, {
+    // Create mono destination for recording (saves ~6x tokens vs stereo 48kHz)
+    const monoDest = audioContext.createMediaStreamDestination();
+    const recSrc = audioContext.createMediaStreamSource(combinedStream);
+    recSrc.connect(monoDest);
+
+    mediaRecorder = new MediaRecorder(monoDest.stream, {
       mimeType: 'audio/webm;codecs=opus',
-      audioBitsPerSecond: 128000
+      audioBitsPerSecond: 32000
     });
     audioChunks = [];
     mediaRecorder.ondataavailable = e => {
@@ -200,7 +223,7 @@ async function addSystemAudio(micStream) {
     // Drop the unwanted video track immediately
     systemAudioStream.getVideoTracks().forEach(t => t.stop());
 
-    const ctx = audioContext || new AudioContext({ sampleRate: 48000 });
+    const ctx = audioContext || new AudioContext({ sampleRate: 16000 });
     const micSrc = ctx.createMediaStreamSource(micStream);
     const sysSrc = ctx.createMediaStreamSource(new MediaStream(systemAudioStream.getAudioTracks()));
     const dest = ctx.createMediaStreamDestination();
@@ -254,13 +277,9 @@ async function finishRecording() {
       document.getElementById('record-active').classList.add('hidden');
       updateTopbar('record');
 
-      showToast('Recording saved!', 'check_circle');
+      showToast('Recording saved! Click "Transcribe Now" when ready.', 'check_circle');
       await loadMeetings();
       navigateTo('detail', currentMeeting.id);
-
-      // Auto-transcribe if Google API key is configured
-      const model = settings.transcriptionModel || 'gemini-2.5-flash';
-      if (settings.apiKeys?.google) startTranscription(currentMeeting.id, model);
 
       resolve();
     };
@@ -686,11 +705,16 @@ function setupPlayerControls() {
   // Use BOTH timeupdate AND a rAF loop for smooth progress on Windows
   audioPlayer.addEventListener('timeupdate', updatePlayerUI);
 
-  // loadedmetadata sometimes doesn't fire on Windows for webm blobs —
-  // also listen to durationchange and canplay as fallbacks
+  // Listen to ALL duration-related events — Windows/webm can be flaky
   audioPlayer.addEventListener('loadedmetadata', onDurationKnown);
   audioPlayer.addEventListener('durationchange', onDurationKnown);
   audioPlayer.addEventListener('canplay', onDurationKnown);
+  audioPlayer.addEventListener('canplaythrough', onDurationKnown);
+  audioPlayer.addEventListener('playing', () => {
+    // Force-check duration once playback actually starts (Windows fallback)
+    onDurationKnown();
+    startProgressLoop();
+  });
 
   audioPlayer.addEventListener('ended', () => {
     isPlaying = false;
@@ -747,7 +771,13 @@ async function loadAudioPlayer(meetingId) {
 
   const buffer = await api.getAudioBuffer(meetingId);
   if (buffer) {
-    const blob = new Blob([buffer], { type: 'audio/webm' });
+    // Detect MIME from meeting's audioFile field, or default to webm
+    const meeting = await api.getMeeting(meetingId);
+    const ext = (meeting?.audioFile || 'recording.webm').split('.').pop();
+    const mimeMap = { webm: 'audio/webm', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', wma: 'audio/x-ms-wma' };
+    const mime = mimeMap[ext] || 'audio/webm';
+
+    const blob = new Blob([buffer], { type: mime });
     currentBlobUrl = URL.createObjectURL(blob);
     audioPlayer.src = currentBlobUrl;
     audioPlayer.load();
