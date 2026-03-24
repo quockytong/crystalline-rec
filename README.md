@@ -6,11 +6,11 @@ A native Windows desktop app for recording meetings, transcribing with AI, and c
 
 - **Record meetings** with microphone + system audio capture (hear others even with headphones)
 - **Start/Pause/Resume** recording controls (Start = new meeting)
-- **AI Transcription** via OpenAI Whisper, Deepgram Nova-2, or AssemblyAI with speaker diarization
+- **AI Transcription** via Gemini 2.5 family with speaker diarization
 - **Switch between API models** for transcription
 - **Editable transcripts** with timestamps and speaker names (auto-saved)
 - **Audio playback** synced with transcript highlighting
-- **AI Chat** to ask questions about the transcript (GPT-4o, GPT-4 Turbo, or Claude)
+- **AI Chat** to ask questions about the transcript Gemini 2.5 family
 - **Meeting history** stored locally with full transcript and audio
 - **Delete meetings** with all associated data
 
@@ -45,11 +45,7 @@ Output will be in the `dist/` folder.
 ## Configuration
 
 1. Launch the app and go to **Settings**
-2. Configure your **API Keys**:
-   - **OpenAI** - for Whisper transcription + GPT-4 chat
-   - **Anthropic** - for Claude chat
-   - **Deepgram** - for Deepgram Nova-2 transcription
-   - **AssemblyAI** - for AssemblyAI transcription
+2. Configure your **API Keys** (using Gemini only. You have 300$ credit, right?)
 3. Choose your preferred **Transcription Model** and **Chat Model**
 4. Select your **Audio Input Device** (microphone)
 5. Set your **Save Location** for recordings
@@ -74,7 +70,7 @@ Output will be in the `dist/` folder.
 2. Use the AI chat panel on the right
 3. Click **"Summarize"** or **"Key Actions"** for quick insights
 4. Ask any question about the meeting content
-5. Switch between GPT-4o, GPT-4 Turbo, or Claude
+5. Switch between models
 
 ## System Audio Capture (Windows)
 
@@ -98,4 +94,4 @@ Each meeting gets its own folder with:
 - **Tailwind CSS** (CDN) - Styling
 - **Material Symbols** - Icons
 - **electron-store** - Settings persistence
-- **OpenAI / Deepgram / AssemblyAI / Anthropic APIs** - AI services
+- **Gemini** - AI services
