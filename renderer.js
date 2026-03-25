@@ -702,8 +702,12 @@ function setupPlayerControls() {
     updatePlayerUI();
   });
 
-  // Use BOTH timeupdate AND a rAF loop for smooth progress on Windows
-  audioPlayer.addEventListener('timeupdate', updatePlayerUI);
+  // Use BOTH timeupdate AND a rAF loop for smooth progress on Windows.
+  // Also triggers onDurationKnown during the WebM Infinity-fix seek.
+  audioPlayer.addEventListener('timeupdate', () => {
+    if (webmDurationFixInProgress) { onDurationKnown(); return; }
+    updatePlayerUI();
+  });
 
   // Listen to ALL duration-related events — Windows/webm can be flaky
   audioPlayer.addEventListener('loadedmetadata', onDurationKnown);
@@ -730,10 +734,29 @@ function setupPlayerControls() {
   });
 }
 
+let webmDurationFixInProgress = false;
+
 function onDurationKnown() {
-  if (!audioPlayer.duration || !isFinite(audioPlayer.duration)) return;
+  const d = audioPlayer.duration;
+  if (!d) return;
+
+  // WebM files from MediaRecorder have no duration metadata — Chromium reports Infinity.
+  // Fix: seek to a huge timestamp; Chromium scans to the file end and returns the real duration.
+  if (d === Infinity && !webmDurationFixInProgress) {
+    webmDurationFixInProgress = true;
+    audioPlayer.currentTime = 1e101;
+    return; // timeupdate will fire once Chromium finds the real duration
+  }
+
+  if (!isFinite(d)) return;
+
+  if (webmDurationFixInProgress) {
+    webmDurationFixInProgress = false;
+    audioPlayer.currentTime = 0; // reset to start after the seek fix
+  }
+
   playerReady = true;
-  document.getElementById('player-total-time').textContent = formatDuration(audioPlayer.duration);
+  document.getElementById('player-total-time').textContent = formatDuration(d);
 }
 
 function updatePlayerUI() {
@@ -764,6 +787,7 @@ async function loadAudioPlayer(meetingId) {
   // Reset state
   stopProgressLoop();
   playerReady = false;
+  webmDurationFixInProgress = false;
   isPlaying = false;
   updatePlayBtn();
 

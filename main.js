@@ -290,7 +290,7 @@ async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/we
 
     // For short audio (≤ 2 min), transcribe in one shot
     if (chunkCount <= 2) {
-      return await transcribeChunk(fileUri, apiKey, model, null, null);
+      return await transcribeChunk(fileUri, apiKey, model, null, null, null, mime);
     }
 
     // Step 3: transcribe in 1-minute windows to reduce output tokens per call
@@ -311,7 +311,7 @@ async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/we
 
       try {
         const segments = await transcribeChunk(
-          fileUri, apiKey, model, startSec, endSec, previousSpeakers
+          fileUri, apiKey, model, startSec, endSec, previousSpeakers, mime
         );
         // Track speaker names for consistency
         segments.forEach(seg => {
@@ -335,7 +335,7 @@ async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/we
   }
 }
 
-async function transcribeChunk(fileUri, apiKey, model, startSec, endSec, knownSpeakers) {
+async function transcribeChunk(fileUri, apiKey, model, startSec, endSec, knownSpeakers, mime = 'audio/webm') {
   let timeInstruction = '';
   if (startSec !== null && endSec !== null) {
     const startTs = formatTimestamp(startSec);
