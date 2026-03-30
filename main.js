@@ -275,40 +275,46 @@ function mimeForExt(ext) {
 
 // ============ GEMINI TRANSCRIPTION ============
 
-const CHUNK_DURATION_SEC = 60; // 1-minute windows
-const CHUNK_OVERLAP_SEC  = 5;  // 5s tail overlap to avoid cutting words at boundaries
-const MAX_RETRIES        = 3;  // retries per chunk before giving up on it
-const RETRY_DELAY_MS     = 2000; // base delay; multiplied by attempt number
-
-// Returns approximate bytes/sec for a given mime type — used for duration estimation.
-// Direct recordings are webm/opus at ~32kbps (4 KB/s).
-// Imported files are typically mp3/m4a at ~128kbps (16 KB/s).
-function getBytesPerSec(mime) {
-  if (mime === 'audio/webm' || mime === 'audio/ogg') return 4000;
-  return 16000;
-}
+const CHUNK_SEC            = 180;  // 3-minute windows → better speaker context, fewer cuts
+const MAX_RETRIES          = 3;    // retries per chunk before giving up
+const RETRY_DELAY_MS       = 2000; // base delay × attempt number
+const MAX_CONSECUTIVE_EMPTY = 3;   // stop early after this many empty chunks in a row
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// After all chunks are merged, remove near-duplicate segments that fell in the
-// overlap window between adjacent chunks (same speaker + matching opening text).
+// Conservative bytes/sec: deliberately LOW so we overestimate duration.
+// Dynamic-stop handles the real end, so extra empty chunks are cheap.
+function getBytesPerSec(mime) {
+  if (mime === 'audio/webm' || mime === 'audio/ogg') return 2500; // covers 20-48 kbps
+  return 5000; // covers 40-320 kbps m4a/mp3 — always overestimates
+}
+
+// ---- Deduplication ----
+// Two segments are considered duplicates if their time ranges overlap significantly
+// (>50 %) and their text starts with the same words.
 function reconcileSegments(segments) {
   if (segments.length === 0) return segments;
   segments.sort((a, b) => a.startTime - b.startTime);
   const out = [];
   for (const seg of segments) {
-    const dup = out.some(e =>
-      Math.abs(e.startTime - seg.startTime) < 2.0 &&
-      e.speaker === seg.speaker &&
-      e.text.substring(0, 20) === seg.text.substring(0, 20)
-    );
-    if (!dup) out.push(seg);
+    const isDup = out.some(e => {
+      // Time-range overlap check
+      const overlapStart = Math.max(e.startTime, seg.startTime);
+      const overlapEnd   = Math.min(e.endTime, seg.endTime);
+      const overlap      = Math.max(0, overlapEnd - overlapStart);
+      const shorter      = Math.min(e.endTime - e.startTime, seg.endTime - seg.startTime) || 1;
+      if (overlap / shorter < 0.5) return false;
+      // Text similarity: first 30 chars or first 5 words
+      const wordsE = e.text.split(/\s+/).slice(0, 5).join(' ');
+      const wordsS = seg.text.split(/\s+/).slice(0, 5).join(' ');
+      return wordsE === wordsS;
+    });
+    if (!isDup) out.push(seg);
   }
   return out;
 }
 
-// Persist partial transcript to disk after each successful chunk so a crash
-// or API failure mid-way doesn't lose all progress.
+// Save partial transcript after every successful chunk → crash-safe.
 function savePartialTranscript(meetingId, segments) {
   try {
     const p = path.join(store.get('saveLocation'), meetingId, 'meeting.json');
@@ -317,22 +323,41 @@ function savePartialTranscript(meetingId, segments) {
     meeting.transcript = segments;
     meeting.status = 'transcribing';
     fs.writeFileSync(p, JSON.stringify(meeting, null, 2));
-  } catch (e) {
-    console.error('savePartialTranscript:', e.message);
-  }
+  } catch (e) { console.error('savePartialTranscript:', e.message); }
+}
+
+// Try to read the actual duration (seconds) that Gemini extracted from the file.
+// The File API returns videoMetadata.videoDuration for audio too (e.g. "5760s").
+async function queryFileDuration(fileName, apiKey) {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const dur = data.videoMetadata?.videoDuration;    // "5760s" or "5760.123s"
+    if (dur) return parseFloat(dur);
+    return null;
+  } catch { return null; }
 }
 
 async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/webm', meetingId = null) {
-  // Upload the file once; all chunk requests reference the same URI.
-  const fileUri = await uploadGeminiFile(audioBuffer, apiKey, mime);
+  const { uri: fileUri, name: fileName } = await uploadGeminiFile(audioBuffer, apiKey, mime);
 
   try {
-    // Accurate duration estimate based on codec/format, not arbitrary file-size threshold.
-    const estimatedDuration = Math.max(60, Math.ceil(audioBuffer.length / getBytesPerSec(mime)));
-    const chunkCount = Math.ceil(estimatedDuration / CHUNK_DURATION_SEC);
+    // 1. Try to get the REAL duration from Gemini's file metadata.
+    let duration = await queryFileDuration(fileName, apiKey);
 
-    // Short recordings: single-pass transcription is cheaper and faster.
-    if (chunkCount <= 2) {
+    // 2. Fallback: conservative estimate (always overestimates → safe).
+    if (!duration || duration < 1) {
+      duration = Math.ceil(audioBuffer.length / getBytesPerSec(mime));
+    }
+    duration = Math.max(60, duration);
+
+    const maxChunks = Math.ceil(duration / CHUNK_SEC);
+
+    // Short audio (≤ 6 min): single pass — no chunking overhead.
+    if (duration <= CHUNK_SEC * 2) {
       const segs = await transcribeChunkWithRetry(fileUri, apiKey, model, null, null, [], mime);
       if (meetingId) savePartialTranscript(meetingId, segs);
       return segs;
@@ -340,16 +365,16 @@ async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/we
 
     const allSegments = [];
     const previousSpeakers = [];
+    let consecutiveEmpty = 0;
 
-    for (let i = 0; i < chunkCount; i++) {
-      const startSec = i * CHUNK_DURATION_SEC;
-      // Add overlap tail so words at chunk boundaries are not cut off.
-      const endSec   = (i + 1) * CHUNK_DURATION_SEC + CHUNK_OVERLAP_SEC;
+    for (let i = 0; i < maxChunks; i++) {
+      const startSec = i * CHUNK_SEC;
+      const endSec   = (i + 1) * CHUNK_SEC;
 
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('transcription-progress', {
           current: i + 1,
-          total: chunkCount,
+          total: maxChunks,
           savedSegments: allSegments.length
         });
       }
@@ -358,14 +383,24 @@ async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/we
         fileUri, apiKey, model, startSec, endSec, previousSpeakers, mime
       );
 
-      segments.forEach(seg => {
-        if (!previousSpeakers.includes(seg.speaker)) previousSpeakers.push(seg.speaker);
-      });
-      allSegments.push(...segments);
+      if (segments.length === 0) {
+        consecutiveEmpty++;
+        // Dynamic stop: if we've passed the estimated content and keep getting
+        // empty chunks, the audio has ended — no point burning more API calls.
+        if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY) {
+          console.log(`Stopping early: ${MAX_CONSECUTIVE_EMPTY} consecutive empty chunks at ${startSec}s`);
+          break;
+        }
+      } else {
+        consecutiveEmpty = 0;
+        segments.forEach(seg => {
+          if (!previousSpeakers.includes(seg.speaker)) previousSpeakers.push(seg.speaker);
+        });
+        allSegments.push(...segments);
 
-      // Persist reconciled progress so failures mid-way don't lose work.
-      if (meetingId && segments.length > 0) {
-        savePartialTranscript(meetingId, reconcileSegments([...allSegments]));
+        if (meetingId) {
+          savePartialTranscript(meetingId, reconcileSegments([...allSegments]));
+        }
       }
     }
 
@@ -379,9 +414,7 @@ async function transcribeWithGemini(audioBuffer, apiKey, model, mime = 'audio/we
   }
 }
 
-// Wraps transcribeChunk with up to MAX_RETRIES attempts and exponential backoff.
-// Returns an empty array (rather than throwing) if all retries are exhausted,
-// so the overall transcription can continue with the remaining chunks.
+// Retry wrapper — returns [] on exhaustion so the loop continues.
 async function transcribeChunkWithRetry(fileUri, apiKey, model, startSec, endSec, knownSpeakers, mime) {
   let lastErr;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -390,31 +423,39 @@ async function transcribeChunkWithRetry(fileUri, apiKey, model, startSec, endSec
     } catch (err) {
       lastErr = err;
       const label = startSec !== null ? `${startSec}-${endSec}s` : 'full';
-      console.warn(`Chunk [${label}] attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`);
+      console.warn(`Chunk [${label}] attempt ${attempt}/${MAX_RETRIES}: ${err.message}`);
       if (attempt < MAX_RETRIES) await sleep(RETRY_DELAY_MS * attempt);
     }
   }
-  console.error(`Chunk [${startSec}-${endSec}s] gave up after ${MAX_RETRIES} retries:`, lastErr.message);
-  return []; // partial failure — continue with remaining chunks
+  console.error(`Chunk [${startSec}-${endSec}s] gave up after ${MAX_RETRIES} retries`);
+  return [];
 }
 
 async function transcribeChunk(fileUri, apiKey, model, startSec, endSec, knownSpeakers, mime = 'audio/webm') {
   let timeInstruction = '';
   if (startSec !== null && endSec !== null) {
     const startTs = formatTimestamp(startSec);
-    const endTs = formatTimestamp(endSec);
-    timeInstruction = `\nOnly transcribe audio between ${startTs} and ${endTs}. Ignore audio outside this window. Timestamps must be absolute (from the start of the full recording).`;
+    const endTs   = formatTimestamp(endSec);
+    timeInstruction = `\nFocus ONLY on audio between ${startTs} and ${endTs}. All timestamps must be absolute (from the start of the full recording). Do NOT repeat content from earlier sections.`;
   }
 
   let speakerInstruction = '';
   if (knownSpeakers && knownSpeakers.length > 0) {
-    speakerInstruction = `\nKnown speakers so far: ${knownSpeakers.join(', ')}. Reuse these names if the same voices appear. Only add new speaker labels if you hear a new voice.`;
+    speakerInstruction = `\nSpeakers already identified: ${knownSpeakers.join(', ')}. You MUST reuse these exact labels for the same voices. Only create a new label if you clearly hear a voice not matching any of the above.`;
   }
 
-  const prompt = `Transcribe this meeting audio. Output ONLY a JSON array, no markdown, no explanation.
-Label speakers "Speaker 1", "Speaker 2" etc. by voice (consistent throughout).${speakerInstruction}${timeInstruction}
-Each item: {"speaker":"Speaker 1","timestamp":"00:00:04","startTime":4.0,"endTime":9.5,"text":"words"}
-If the audio segment is silent or has no speech, return an empty array [].
+  const prompt = `You are a professional transcriptionist. Transcribe this meeting audio with accurate speaker diarization.
+
+RULES:
+- Output ONLY a valid JSON array. No markdown fences, no explanation, no commentary.
+- Identify each distinct voice and label them consistently as "Speaker 1", "Speaker 2", etc.${speakerInstruction}
+- Pay close attention to voice pitch, accent, and speaking style to distinguish speakers.
+- Group consecutive sentences by the same speaker into one segment (do not split every sentence).${timeInstruction}
+
+FORMAT for each element:
+{"speaker":"Speaker 1","timestamp":"00:00:04","startTime":4.0,"endTime":9.5,"text":"transcribed words here"}
+
+If the segment is completely silent or has no speech at all, return exactly: []
 JSON array:`;
 
   const res = await fetch(
@@ -423,27 +464,23 @@ JSON array:`;
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{
-          parts: [
-            { fileData: { mimeType: mime, fileUri } },
-            { text: prompt }
-          ]
-        }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 4096 }
+        contents: [{ parts: [
+          { fileData: { mimeType: mime, fileUri } },
+          { text: prompt }
+        ]}],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
       })
     }
   );
 
   if (!res.ok) throw new Error(`Gemini transcription error: ${await res.text()}`);
   const data = await res.json();
-
   const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-  // Parse JSON — strip any accidental markdown fences
   const clean = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
   const jsonStart = clean.indexOf('[');
-  const jsonEnd = clean.lastIndexOf(']');
-  if (jsonStart === -1 || jsonEnd === -1) return []; // empty chunk
+  const jsonEnd   = clean.lastIndexOf(']');
+  if (jsonStart === -1 || jsonEnd === -1) return [];
 
   const segments = JSON.parse(clean.slice(jsonStart, jsonEnd + 1));
   return segments.map(seg => ({
@@ -451,13 +488,12 @@ JSON array:`;
     speaker: seg.speaker || 'Speaker 1',
     timestamp: seg.timestamp || formatTimestamp(seg.startTime || 0),
     startTime: Number(seg.startTime) || 0,
-    endTime: Number(seg.endTime) || 0,
+    endTime:   Number(seg.endTime)   || 0,
     text: (seg.text || '').trim()
   })).filter(seg => seg.text.length > 0);
 }
 
 async function uploadGeminiFile(audioBuffer, apiKey, mime = 'audio/webm') {
-  // Multipart upload to the Gemini File API
   const boundary = `----GeminiBoundary${Date.now()}`;
   const meta = JSON.stringify({ file: { mimeType: mime, displayName: 'recording' } });
 
@@ -479,9 +515,8 @@ async function uploadGeminiFile(audioBuffer, apiKey, mime = 'audio/webm') {
 
   if (!res.ok) throw new Error(`Gemini file upload failed: ${await res.text()}`);
   const data = await res.json();
-
   if (!data.file?.uri) throw new Error('Gemini file upload did not return a URI');
-  return data.file.uri;
+  return { uri: data.file.uri, name: data.file.name };
 }
 
 async function deleteGeminiFile(fileUri, apiKey) {
